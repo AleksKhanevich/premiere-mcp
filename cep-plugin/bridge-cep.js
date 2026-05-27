@@ -598,6 +598,223 @@
         console.log(message);
     };
 
+    MCPPremiereBridge.prototype.runBaseEditing = function(onDuplicate) {
+        var self = this;
+        var presetInput = document.getElementById('bePresetPath');
+        var presetPath = presetInput ? (presetInput.value || '') : '';
+        var fadeInput = document.getElementById('beFadeDuration');
+        var fadeDuration = fadeInput && fadeInput.value ? parseFloat(fadeInput.value) : 0.04;
+        if (!(fadeDuration > 0)) fadeDuration = 0.04;
+        var scaleInput = document.getElementById('beScalePercent');
+        var scalePercent = scaleInput && scaleInput.value ? parseFloat(scaleInput.value) : 130;
+        if (!(scalePercent > 0)) scalePercent = 130;
+        var posYInput = document.getElementById('bePosY');
+        var positionYpx = posYInput && posYInput.value ? parseFloat(posYInput.value) : 613;
+        var frameH = 1080;
+        var positionYnorm = positionYpx / frameH;
+        var positionXnorm = 0.5;
+        var audioTransitionName = 'Custom Fade';
+        var sourceVT = 0;
+        var targetVT = 1;
+        var zoomStart = 1; /* odd */
+        var labelIndex = 1; /* Iris */
+        var duplicateFirst = !!onDuplicate;
+
+        var btn = document.getElementById('baseEditingButton');
+        var btnDup = document.getElementById('baseEditingDupButton');
+        if (btn) btn.disabled = true;
+        if (btnDup) btnDup.disabled = true;
+        self.log('Base Editing started (preset: ' + (presetPath || 'none') + ', duplicate: ' + duplicateFirst + ')', 'info');
+
+        var script = ''
+            + '(function() {'
+            + 'try {'
+            + '  app.enableQE();'
+            + '  var sequence = app.project.activeSequence;'
+            + '  if (!sequence) return JSON.stringify({ success: false, error: "No active sequence" });'
+            + '  if (' + (duplicateFirst ? 'true' : 'false') + ') {'
+            + '    try {'
+            + '      var origName = sequence.name;'
+            + '      var dupName = origName + "_BaseEdit";'
+            + '      var qeOrig = qe.project.getActiveSequence();'
+            + '      if (qeOrig && typeof qeOrig.duplicate === "function") {'
+            + '        qeOrig.duplicate();'
+            + '        var newSeq = null;'
+            + '        for (var sx = 0; sx < app.project.sequences.numSequences; sx++) {'
+            + '          var ss = app.project.sequences[sx];'
+            + '          if (ss.name === origName + " Copy" || ss.name === origName + " copy" || ss.name.indexOf(origName) === 0 && ss.sequenceID !== sequence.sequenceID) {'
+            + '            newSeq = ss;'
+            + '          }'
+            + '        }'
+            + '        if (newSeq) {'
+            + '          try { newSeq.name = dupName; } catch (eR) {}'
+            + '          app.project.openSequence(newSeq.sequenceID);'
+            + '          sequence = app.project.activeSequence;'
+            + '        }'
+            + '      }'
+            + '    } catch (eDup) { /* fall back to original */ }'
+            + '  }'
+            + '  var qeSeq = qe.project.getActiveSequence();'
+            + '  var fps = sequence.timebase ? (254016000000 / parseInt(sequence.timebase, 10)) : 30;'
+            + '  var fadeFrames = Math.max(1, Math.round(' + fadeDuration + ' * fps));'
+            + '  var report = { sequenceName: sequence.name, audioTracksTouched: 0, audioTransitionsAdded: 0, audioErrors: [], presetApplied: 0, presetSkipped: 0, presetErrors: [], zoomDupsCreated: 0, zoomErrors: [] };'
+            + '  var audioTrans = null;'
+            + '  try { audioTrans = qe.project.getAudioTransitionByName(' + JSON.stringify(audioTransitionName) + '); } catch (eT) {}'
+            + '  if (!audioTrans) { try { audioTrans = qe.project.getAudioTransitionByName("Constant Power"); } catch (eT2) {} }'
+            + '  if (audioTrans) {'
+            + '    for (var ai = 0; ai < sequence.audioTracks.numTracks; ai++) {'
+            + '      var aTrack = sequence.audioTracks[ai];'
+            + '      if (aTrack.clips.numItems < 2) continue;'
+            + '      var qeATrack = qeSeq.getAudioTrackAt(ai);'
+            + '      var trackAdded = 0;'
+            + '      for (var ac = 0; ac < aTrack.clips.numItems; ac++) {'
+            + '        try {'
+            + '          var qeAClip = qeATrack.getItemAt(ac);'
+            + '          qeAClip.addTransition(audioTrans, true, fadeFrames + ":00", "0:00", 0.5, false, true);'
+            + '          trackAdded++;'
+            + '        } catch (eAC) { report.audioErrors.push("track " + ai + " clip " + ac + ": " + eAC.toString()); }'
+            + '      }'
+            + '      if (trackAdded > 0) { report.audioTracksTouched++; report.audioTransitionsAdded += trackAdded; }'
+            + '    }'
+            + '  } else { report.audioErrors.push("Audio transition not found"); }'
+            + '  var presetPath = ' + JSON.stringify(presetPath) + ';'
+            + '  var presetFile = null;'
+            + '  if (presetPath) {'
+            + '    try { var pf = new File(presetPath); if (pf.exists) presetFile = pf; else report.presetErrors.push("Preset not found at: " + presetPath); } catch (eF) { report.presetErrors.push("File ctor: " + eF.toString()); }'
+            + '  }'
+            + '  if (presetFile) {'
+            + '    /* Detect supported preset method ONCE — audio TrackItem in PPro 2026 has no applyPreset */'
+            + '    var presetMethod = null;'
+            + '    var firstClip = null;'
+            + '    for (var probeT = 0; probeT < sequence.audioTracks.numTracks && !firstClip; probeT++) {'
+            + '      if (sequence.audioTracks[probeT].clips.numItems > 0) firstClip = sequence.audioTracks[probeT].clips[0];'
+            + '    }'
+            + '    if (firstClip) {'
+            + '      if (typeof firstClip.applyPreset === "function") presetMethod = "trackItem";'
+            + '      else {'
+            + '        try { var qeProbe = qeSeq.getAudioTrackAt(0).getItemAt(0); if (qeProbe && typeof qeProbe.applyPreset === "function") presetMethod = "qe"; } catch (eQP) {}'
+            + '      }'
+            + '    }'
+            + '    if (!presetMethod) {'
+            + '      report.presetErrors.push("AudioClipTrackItem.applyPreset is not a function in this Premiere version. Apply Audio Refiner manually: select audio clips → right-click → Apply Preset → Audio Refiner.");'
+            + '    } else {'
+            + '      for (var apT = 0; apT < sequence.audioTracks.numTracks; apT++) {'
+            + '        var apTrack = sequence.audioTracks[apT];'
+            + '        if (apTrack.clips.numItems === 0) continue;'
+            + '        var qeApTrack = null; try { qeApTrack = qeSeq.getAudioTrackAt(apT); } catch (eQT) {}'
+            + '        for (var apC = 0; apC < apTrack.clips.numItems; apC++) {'
+            + '          try {'
+            + '            var apClip = apTrack.clips[apC];'
+            + '            var ok = false;'
+            + '            if (presetMethod === "trackItem") { ok = apClip.applyPreset(presetFile); }'
+            + '            else if (presetMethod === "qe" && qeApTrack) { try { var qeAC = qeApTrack.getItemAt(apC); ok = qeAC.applyPreset(presetFile); } catch (eQAC) { ok = false; } }'
+            + '            if (ok === false) { report.presetErrors.push("track " + apT + " clip " + apC + " via " + presetMethod + ": returned false"); report.presetSkipped++; }'
+            + '            else { report.presetApplied++; }'
+            + '          } catch (ePA) { report.presetErrors.push("track " + apT + " clip " + apC + ": " + ePA.toString()); report.presetSkipped++; }'
+            + '        }'
+            + '      }'
+            + '    }'
+            + '    report.presetMethod = presetMethod;'
+            + '  }'
+            + '  var srcTrack = sequence.videoTracks[' + sourceVT + '];'
+            + '  var tgtTrack = sequence.videoTracks[' + targetVT + '];'
+            + '  if (srcTrack && tgtTrack) {'
+            + '    /* Disable targeting on ALL audio tracks (best-effort) and snapshot pre-existing audio clips for cleanup */'
+            + '    var savedAudioTargets = [];'
+            + '    for (var atI = 0; atI < sequence.audioTracks.numTracks; atI++) {'
+            + '      try { savedAudioTargets.push(sequence.audioTracks[atI].isTargeted()); sequence.audioTracks[atI].setTargeted(false, true); } catch (eAT) { savedAudioTargets.push(null); }'
+            + '    }'
+            + '    var preAudioKeys = {};'
+            + '    for (var paT = 0; paT < sequence.audioTracks.numTracks; paT++) {'
+            + '      preAudioKeys[paT] = {};'
+            + '      var paTrack = sequence.audioTracks[paT];'
+            + '      for (var paC = 0; paC < paTrack.clips.numItems; paC++) {'
+            + '        try { var paClip = paTrack.clips[paC]; preAudioKeys[paT][Math.round(paClip.start.seconds * 1000) + "_" + Math.round(paClip.end.seconds * 1000)] = true; } catch (ePA) {}'
+            + '      }'
+            + '    }'
+            + '    var snapshots = [];'
+            + '    for (var vi = 0; vi < srcTrack.clips.numItems; vi++) {'
+            + '      var sc = srcTrack.clips[vi];'
+            + '      snapshots.push({ index: vi, start: sc.start.seconds, end: sc.end.seconds, inPoint: sc.inPoint.seconds, outPoint: sc.outPoint.seconds, projItem: sc.projectItem || null });'
+            + '    }'
+            + '    for (var si = 0; si < snapshots.length; si++) {'
+            + '      if ((si % 2) !== ' + zoomStart + ') continue;'
+            + '      var snap = snapshots[si];'
+            + '      if (!snap.projItem) continue;'
+            + '      try {'
+            + '        tgtTrack.overwriteClip(snap.projItem, snap.start);'
+            + '        var newClip = null;'
+            + '        for (var tc = 0; tc < tgtTrack.clips.numItems; tc++) {'
+            + '          var cand = tgtTrack.clips[tc];'
+            + '          if (Math.abs(cand.start.seconds - snap.start) < 0.005) { newClip = cand; break; }'
+            + '        }'
+            + '        if (!newClip) { report.zoomErrors.push("idx " + si + ": insert lookup failed"); continue; }'
+            + '        try { var ip = new Time(); ip.seconds = snap.inPoint; newClip.inPoint = ip; } catch (e1) {}'
+            + '        try { var op = new Time(); op.seconds = snap.outPoint; newClip.outPoint = op; } catch (e2) {}'
+            + '        try { var en = new Time(); en.seconds = snap.end; newClip.end = en; } catch (e3) {}'
+            + '        var motion = null;'
+            + '        try { for (var comp = 0; comp < newClip.components.numItems; comp++) { var cc = newClip.components[comp]; var dn = ""; try { dn = cc.displayName; } catch (eD) {} if (dn === "Motion") { motion = cc; break; } } } catch (eM) {}'
+            + '        if (motion && motion.properties && motion.properties.numItems > 0) {'
+            + '          var pPos = null, pScale = null, pUniform = null;'
+            + '          for (var pi = 0; pi < motion.properties.numItems; pi++) {'
+            + '            try { var prp = motion.properties[pi]; var pdn = ""; try { pdn = prp.displayName; } catch (ePD) {}'
+            + '              if (pdn === "Position") pPos = prp;'
+            + '              else if (pdn === "Scale") pScale = prp;'
+            + '              else if (pdn === "Uniform Scale") pUniform = prp;'
+            + '            } catch (ePI) {}'
+            + '          }'
+            + '          if (!pPos) { try { pPos = motion.properties[0]; } catch (eF1) {} }'
+            + '          if (!pScale) { try { pScale = motion.properties[1]; } catch (eF2) {} }'
+            + '          try { if (pUniform) pUniform.setValue(true, true); } catch (eU) {}'
+            + '          try { if (pScale) pScale.setValue(' + scalePercent + ', true); } catch (eS) {}'
+            + '          try { if (pPos) pPos.setValue([' + positionXnorm + ', ' + positionYnorm + '], true); } catch (eP) {}'
+            + '        }'
+            + '        try { newClip.setColorLabel(' + labelIndex + '); } catch (eL1) { try { newClip.label = ' + labelIndex + '; } catch (eL2) { report.zoomErrors.push("idx " + si + " label: " + eL1.toString() + " / " + eL2.toString()); } }'
+            + '        report.zoomDupsCreated++;'
+            + '      } catch (eDupC) { report.zoomErrors.push("idx " + si + ": " + eDupC.toString()); }'
+            + '    }'
+            + '    /* Cleanup: remove any new audio clips that appeared during V2 dup (Premiere inserts linked AV despite targeting=false) */'
+            + '    var strayAudio = 0;'
+            + '    for (var cuT = 0; cuT < sequence.audioTracks.numTracks; cuT++) {'
+            + '      var cuTrack = sequence.audioTracks[cuT];'
+            + '      var toRemove = [];'
+            + '      for (var cuC = 0; cuC < cuTrack.clips.numItems; cuC++) {'
+            + '        try {'
+            + '          var cuClip = cuTrack.clips[cuC];'
+            + '          var key = Math.round(cuClip.start.seconds * 1000) + "_" + Math.round(cuClip.end.seconds * 1000);'
+            + '          if (!(preAudioKeys[cuT] && preAudioKeys[cuT][key])) toRemove.push(cuClip);'
+            + '        } catch (eCU) {}'
+            + '      }'
+            + '      for (var rmI = toRemove.length - 1; rmI >= 0; rmI--) {'
+            + '        try { toRemove[rmI].remove(false, false); strayAudio++; } catch (eRm) {}'
+            + '      }'
+            + '    }'
+            + '    report.strayAudioRemoved = strayAudio;'
+            + '    /* restore audio targeting */'
+            + '    for (var atR = 0; atR < savedAudioTargets.length && atR < sequence.audioTracks.numTracks; atR++) {'
+            + '      try { if (savedAudioTargets[atR] !== null) sequence.audioTracks[atR].setTargeted(!!savedAudioTargets[atR], true); } catch (eAR) {}'
+            + '    }'
+            + '  }'
+            + '  return JSON.stringify({ success: true, fps: fps, fadeFrames: fadeFrames, report: report });'
+            + '} catch (eAll) { return JSON.stringify({ success: false, error: eAll.toString() }); }'
+            + '})();';
+
+        this.executeExtendScript(script, function(err, result) {
+            if (btn) btn.disabled = false;
+            if (btnDup) btnDup.disabled = false;
+            if (err) { self.log('Base Editing FAILED: ' + err.message, 'error'); return; }
+            if (!result || result.success === false) {
+                self.log('Base Editing error: ' + (result && result.error ? result.error : 'unknown'), 'error');
+                return;
+            }
+            var r = result.report || {};
+            self.log('Base Editing OK on "' + (r.sequenceName || '?') + '" — fades: ' + (r.audioTransitionsAdded || 0) + ' on ' + (r.audioTracksTouched || 0) + ' tracks; preset applied: ' + (r.presetApplied || 0) + (r.presetSkipped ? ' (' + r.presetSkipped + ' skipped)' : '') + '; zoom dups: ' + (r.zoomDupsCreated || 0), 'info');
+            if (r.audioErrors && r.audioErrors.length) self.log('Audio errors (' + r.audioErrors.length + '): ' + r.audioErrors.slice(0,3).join(' | '), 'warning');
+            if (r.presetErrors && r.presetErrors.length) self.log('Preset errors (' + r.presetErrors.length + '): ' + r.presetErrors.slice(0,3).join(' | '), 'warning');
+            if (r.zoomErrors && r.zoomErrors.length) self.log('Zoom errors (' + r.zoomErrors.length + '): ' + r.zoomErrors.slice(0,3).join(' | '), 'warning');
+        });
+    };
+
     MCPPremiereBridge.prototype.clearLog = function() {
         var logContainer = document.getElementById('logContainer');
         if (logContainer) logContainer.innerHTML = '<div class="log-entry info">Log cleared</div>';
@@ -610,6 +827,7 @@
     window.runDiagnostics = function() { if (window.bridge) window.bridge.runDiagnostics(); };
     window.saveConfig = function() { if (window.bridge) window.bridge.saveConfig(); };
     window.clearLog = function() { if (window.bridge) window.bridge.clearLog(); };
+    window.runBaseEditing = function(onDuplicate) { if (window.bridge) window.bridge.runBaseEditing(onDuplicate); };
     document.addEventListener('DOMContentLoaded', function() {
         window.bridge = new MCPPremiereBridge();
     });

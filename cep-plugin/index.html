@@ -507,6 +507,31 @@
 
         <section class="panel">
             <div class="panel-title">
+                <h2>Khanix Base Editing</h2>
+                <span>One-click pass on active sequence</span>
+            </div>
+            <div class="config-copy">
+                Adds audio crossfades + applies Audio Refiner preset + duplicates every other V1 clip onto V2 with zoom punch-in.
+            </div>
+            <label for="bePresetPath">Audio Refiner preset (.prfpset)</label>
+            <input type="text" id="bePresetPath" placeholder="/Volumes/KhanixMedia/Editind Stuff/Presets/AI Presets Solo/AudioRefiner.prfpset" value="/Volumes/KhanixMedia/Editind Stuff/Presets/AI Presets Solo/AudioRefiner.prfpset">
+            <label for="beFadeDuration" style="margin-top:10px;">Audio crossfade duration (sec)</label>
+            <input type="text" id="beFadeDuration" placeholder="0.04" value="0.04">
+            <label for="beScalePercent" style="margin-top:10px;">V2 zoom scale (%)</label>
+            <input type="text" id="beScalePercent" placeholder="130" value="130">
+            <label for="bePosY" style="margin-top:10px;">V2 position Y (px, 1080p)</label>
+            <input type="text" id="bePosY" placeholder="613" value="613">
+            <div class="button-grid" style="margin-top: 10px;">
+                <button class="primary" onclick="runBaseEditing(false)" id="baseEditingButton">Base Editing — Active Sequence</button>
+                <button class="secondary" onclick="runBaseEditing(true)" id="baseEditingDupButton">Run on Duplicate (safe)</button>
+            </div>
+            <div class="micro-copy" style="margin-top: 10px; margin-bottom: 0;">
+                Defaults: fade 0.4s · zoom every other clip from index 1 · Scale 130% · Position Y 613 · label Iris · V1→V2. Run on Duplicate creates "<seq>_BaseEdit" and switches to it before applying.
+            </div>
+        </section>
+
+        <section class="panel">
+            <div class="panel-title">
                 <h2>Command Queue</h2>
                 <span>Most recent tasks</span>
             </div>

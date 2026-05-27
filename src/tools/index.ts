@@ -367,6 +367,22 @@ export class PremiereProTools {
         })
       },
       {
+        name: 'base_editing',
+        description: 'Khanix Base Editing pass: (1) audio crossfade on every cut of every non-empty audio track, (2) applies the Audio Refiner preset to every audio clip (if audioPresetPath provided), (3) duplicates every Nth clip from V1 onto V2 with a zoom punch-in (Motion Scale + Position Y) and colored label. The Audio Refiner preset must be exported once from Premiere (right-click in Effects panel → Export Presets) and passed via audioPresetPath.',
+        inputSchema: z.object({
+          sequenceId: z.string().optional().describe('Sequence ID. Defaults to active sequence.'),
+          fadeDuration: z.number().optional().describe('Audio crossfade duration in seconds. Default 0.4.'),
+          audioTransitionName: z.string().optional().describe('Audio transition name. Default "Constant Power" (Custom Fade also works if present).'),
+          audioPresetPath: z.string().optional().describe('Absolute path to an exported .prfpset file (e.g. Audio Refiner). When provided, the preset is applied to every audio clip on every non-empty audio track. Default: ~/Documents/Adobe/Premiere Pro/Khanix Presets/Audio Refiner.prfpset'),
+          sourceVideoTrackIndex: z.number().optional().describe('V1 source track index (0-based). Default 0 (A-ROLL).'),
+          targetVideoTrackIndex: z.number().optional().describe('V2 target track index (0-based). Default 1 (A-ROLL 2).'),
+          zoomStart: z.enum(['odd', 'even']).optional().describe('Which clips on V1 get the zoom dup: odd=indexes 1,3,5… (start with second clip); even=indexes 0,2,4… Default "odd".'),
+          scalePercent: z.number().optional().describe('Motion Scale % for the V2 zoom dup. Default 130.'),
+          positionY: z.number().optional().describe('Motion Position Y in pixels (1080-frame default 540 = center). Default 613.'),
+          labelColor: z.string().optional().describe('Color label for the V2 dup: Violet/Iris/Caribbean/Lavender/Cerulean/Forest/Rose/Mango/Purple/Blue/Teal/Magenta/Tan/Green/Brown/Yellow. Default "Iris".')
+        })
+      },
+      {
         name: 'add_transition',
         description: 'Adds a transition (e.g., cross dissolve) between two adjacent clips on the timeline.',
         inputSchema: z.object({
@@ -1219,6 +1235,8 @@ export class PremiereProTools {
           return await this.applyEffect(args.clipId, args.effectName, args.parameters);
         case 'remove_effect':
           return await this.removeEffect(args.clipId, args.effectName);
+        case 'base_editing':
+          return await this.baseEditing(args);
         case 'add_transition':
           return await this.addTransition(args.clipId1, args.clipId2, args.transitionName, args.duration);
         case 'add_transition_to_clip':
@@ -1544,6 +1562,45 @@ export class PremiereProTools {
         var videoTracks = [];
         var audioTracks = [];
 
+        function __collectTransitions(track) {
+          var out = [];
+          try {
+            if (!track) return out;
+            var coll = null;
+            try { coll = track.transitions; } catch (eC) { return out; }
+            if (!coll) return out;
+            var n = 0;
+            try {
+              if (typeof coll.numItems === "number") n = coll.numItems;
+              else if (typeof coll.length === "number") n = coll.length;
+            } catch (eN) { n = 0; }
+            if (n > 2000) n = 2000;
+            for (var k = 0; k < n; k++) {
+              try {
+                var tr = coll[k];
+                if (!tr) continue;
+                var name = null, matchName = null, s = null, e = null, d = null, alignment = null;
+                try { name = tr.name; } catch (e1) {}
+                try { matchName = tr.matchName; } catch (e2) {}
+                try { s = tr.start.seconds; } catch (e3) {}
+                try { e = tr.end.seconds; } catch (e4) {}
+                try { d = tr.duration.seconds; } catch (e5) {}
+                try { alignment = tr.alignment; } catch (e6) {}
+                out.push({
+                  index: k,
+                  name: name,
+                  matchName: matchName,
+                  start: s,
+                  end: e,
+                  duration: d,
+                  alignment: alignment
+                });
+              } catch (eL) { /* skip this transition */ }
+            }
+          } catch (eAll) { /* return what we got */ }
+          return out;
+        }
+
         for (var i = 0; i < sequence.videoTracks.numTracks; i++) {
           var track = sequence.videoTracks[i];
           var clips = [];
@@ -1559,11 +1616,14 @@ export class PremiereProTools {
             });
           }
 
+          var vtrans = __collectTransitions(track);
           videoTracks.push({
             index: i,
             name: track.name || "Video " + (i + 1),
             clips: clips,
-            clipCount: clips.length
+            clipCount: clips.length,
+            transitions: vtrans,
+            transitionCount: vtrans.length
           });
         }
 
@@ -1582,11 +1642,14 @@ export class PremiereProTools {
             });
           }
 
+          var atrans = __collectTransitions(track);
           audioTracks.push({
             index: i,
             name: track.name || "Audio " + (i + 1),
             clips: clips,
-            clipCount: clips.length
+            clipCount: clips.length,
+            transitions: atrans,
+            transitionCount: atrans.length
           });
         }
 
@@ -4765,6 +4828,203 @@ export class PremiereProTools {
   }
 
   // Batch Operations Implementation
+  private async baseEditing(args: any): Promise<any> {
+    const sequenceId = args.sequenceId || '';
+    const fadeDuration = typeof args.fadeDuration === 'number' ? args.fadeDuration : 0.4;
+    const audioTransitionName = args.audioTransitionName || 'Constant Power';
+    const sourceVT = typeof args.sourceVideoTrackIndex === 'number' ? args.sourceVideoTrackIndex : 0;
+    const targetVT = typeof args.targetVideoTrackIndex === 'number' ? args.targetVideoTrackIndex : 1;
+    const zoomStart = args.zoomStart === 'even' ? 0 : 1;
+    const scalePercent = typeof args.scalePercent === 'number' ? args.scalePercent : 130;
+    const positionY = typeof args.positionY === 'number' ? args.positionY : 613;
+    const labelColor = args.labelColor || 'Iris';
+    const defaultPresetPath = `${process.env.HOME}/Documents/Adobe/Premiere Pro/Khanix Presets/Audio Refiner.prfpset`;
+    const audioPresetPath = args.audioPresetPath || defaultPresetPath;
+    const presetExists = (() => { try { return require('fs').existsSync(audioPresetPath); } catch (e) { return false; } })();
+
+    const labelMap: Record<string, number> = {
+      Violet: 0, Iris: 1, Caribbean: 2, Lavender: 3, Cerulean: 4, Forest: 5,
+      Rose: 6, Mango: 7, Purple: 8, Blue: 9, Teal: 10, Magenta: 11,
+      Tan: 12, Green: 13, Brown: 14, Yellow: 15
+    };
+    const labelIndex = labelMap[labelColor] !== undefined ? labelMap[labelColor] : 1;
+
+    const script = `
+      try {
+        app.enableQE();
+        var sequence = __findSequence(${JSON.stringify(sequenceId)});
+        if (!sequence) sequence = app.project.activeSequence;
+        if (!sequence) return JSON.stringify({ success: false, error: "No sequence" });
+
+        var qeSeq = qe.project.getActiveSequence();
+        var fps = sequence.timebase ? (254016000000 / parseInt(sequence.timebase, 10)) : 30;
+        var fadeFrames = Math.max(1, Math.round(${fadeDuration} * fps));
+
+        var report = {
+          audioTracksTouched: 0,
+          audioTransitionsAdded: 0,
+          audioErrors: [],
+          presetApplied: 0,
+          presetSkipped: 0,
+          presetErrors: [],
+          zoomDupsCreated: 0,
+          zoomErrors: [],
+          zoomSkipped: []
+        };
+
+        // ===== (1) Audio crossfades on every cut of every non-empty audio track =====
+        var audioTrans = null;
+        try { audioTrans = qe.project.getAudioTransitionByName(${JSON.stringify(audioTransitionName)}); } catch (eT) {}
+        if (!audioTrans) {
+          // fallback: try Constant Power, then default
+          try { audioTrans = qe.project.getAudioTransitionByName("Constant Power"); } catch (eT2) {}
+        }
+        if (audioTrans) {
+          for (var ai = 0; ai < sequence.audioTracks.numTracks; ai++) {
+            var aTrack = sequence.audioTracks[ai];
+            var aClipCount = aTrack.clips.numItems;
+            if (aClipCount < 2) continue;
+            var qeATrack = qeSeq.getAudioTrackAt(ai);
+            var trackAdded = 0;
+            for (var ac = 0; ac < aClipCount; ac++) {
+              try {
+                var qeAClip = qeATrack.getItemAt(ac);
+                qeAClip.addTransition(audioTrans, true, fadeFrames + ":00", "0:00", 0.5, false, true);
+                trackAdded++;
+              } catch (eAC) {
+                report.audioErrors.push("track " + ai + " clip " + ac + ": " + eAC.toString());
+              }
+            }
+            if (trackAdded > 0) {
+              report.audioTracksTouched++;
+              report.audioTransitionsAdded += trackAdded;
+            }
+          }
+        } else {
+          report.audioErrors.push("Audio transition not found: ${audioTransitionName}");
+        }
+
+        // ===== (1b) Apply Audio Refiner preset to every audio clip =====
+        var presetPath = ${JSON.stringify(audioPresetPath)};
+        var presetFile = null;
+        if (${presetExists ? 'true' : 'false'}) {
+          try { presetFile = new File(presetPath); } catch (eF) { report.presetErrors.push("preset File() ctor: " + eF.toString()); }
+        } else {
+          report.presetErrors.push("Preset file not found at: " + presetPath + " — export 'Audio Refiner' from Effects panel via right-click → Export Presets, save to this path.");
+        }
+        if (presetFile) {
+          for (var apT = 0; apT < sequence.audioTracks.numTracks; apT++) {
+            var apTrack = sequence.audioTracks[apT];
+            if (apTrack.clips.numItems === 0) continue;
+            for (var apC = 0; apC < apTrack.clips.numItems; apC++) {
+              try {
+                var apClip = apTrack.clips[apC];
+                apClip.applyPreset(presetFile);
+                report.presetApplied++;
+              } catch (ePA) {
+                report.presetErrors.push("track " + apT + " clip " + apC + ": " + ePA.toString());
+                report.presetSkipped++;
+              }
+            }
+          }
+        }
+
+        // ===== (2) Duplicate every Nth V1 clip onto V2 with zoom + label =====
+        var srcTrack = sequence.videoTracks[${sourceVT}];
+        var tgtTrack = sequence.videoTracks[${targetVT}];
+        if (!srcTrack) {
+          report.zoomErrors.push("Source video track ${sourceVT} not found");
+        } else if (!tgtTrack) {
+          report.zoomErrors.push("Target video track ${targetVT} not found");
+        } else {
+          var srcClipCount = srcTrack.clips.numItems;
+          // snapshot clip refs by start time so we don't shift while iterating
+          var snapshots = [];
+          for (var vi = 0; vi < srcClipCount; vi++) {
+            var sc = srcTrack.clips[vi];
+            snapshots.push({
+              index: vi,
+              start: sc.start.seconds,
+              end: sc.end.seconds,
+              inPoint: sc.inPoint.seconds,
+              outPoint: sc.outPoint.seconds,
+              projItemNodeId: sc.projectItem ? sc.projectItem.nodeId : null,
+              projItem: sc.projectItem || null
+            });
+          }
+          for (var si = 0; si < snapshots.length; si++) {
+            if ((si % 2) !== ${zoomStart}) continue;
+            var snap = snapshots[si];
+            if (!snap.projItem) {
+              report.zoomSkipped.push({ index: si, reason: "no projectItem" });
+              continue;
+            }
+            try {
+              // insert on V2 at same start time
+              var insertOk = tgtTrack.overwriteClip(snap.projItem, snap.start);
+              // find the newly inserted clip on tgtTrack by start time
+              var newClip = null;
+              for (var tc = 0; tc < tgtTrack.clips.numItems; tc++) {
+                var cand = tgtTrack.clips[tc];
+                if (Math.abs(cand.start.seconds - snap.start) < 0.005) {
+                  newClip = cand;
+                  break;
+                }
+              }
+              if (!newClip) {
+                report.zoomErrors.push({ index: si, error: "inserted clip not found on V2" });
+                continue;
+              }
+              // trim to source clip's in/out
+              try { newClip.inPoint = new Time(); newClip.inPoint.seconds = snap.inPoint; } catch (e1) {}
+              try { newClip.outPoint = new Time(); newClip.outPoint.seconds = snap.outPoint; } catch (e2) {}
+              // also enforce end on timeline
+              try { newClip.end = new Time(); newClip.end.seconds = snap.end; } catch (e3) {}
+
+              // Motion: set Position and Scale
+              var motion = null;
+              try {
+                for (var comp = 0; comp < newClip.components.numItems; comp++) {
+                  var cc = newClip.components[comp];
+                  var dn = "";
+                  try { dn = cc.displayName; } catch (eD) {}
+                  if (dn === "Motion") { motion = cc; break; }
+                }
+              } catch (eM) {}
+              if (motion) {
+                try {
+                  // properties[0]=Position [x,y] in pixels, [1]=Scale (uniform%), [3]=Uniform Scale bool
+                  if (motion.properties && motion.properties.numItems > 1) {
+                    try { motion.properties[1].setValue(${scalePercent}, true); } catch (eS) {}
+                    try { motion.properties[0].setValue([960, ${positionY}], true); } catch (eP) {}
+                  }
+                } catch (eMP) {}
+              }
+
+              // Label color
+              try { newClip.setColorLabel(${labelIndex}); } catch (eL) {}
+
+              report.zoomDupsCreated++;
+            } catch (eDup) {
+              report.zoomErrors.push({ index: si, error: eDup.toString() });
+            }
+          }
+        }
+
+        return JSON.stringify({
+          success: true,
+          sequenceName: sequence.name,
+          fps: fps,
+          fadeFrames: fadeFrames,
+          report: report
+        });
+      } catch (eAll) {
+        return JSON.stringify({ success: false, error: eAll.toString() });
+      }
+    `;
+    return await this.bridge.executeScript(script);
+  }
+
   private async batchAddTransitions(sequenceId: string, trackIndex: number, transitionName: string, duration: number): Promise<any> {
     const script = `
       try {
